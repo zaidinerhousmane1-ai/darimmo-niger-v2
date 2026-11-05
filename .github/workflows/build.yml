@@ -1,0 +1,75 @@
+name: Build APK DARIMMO
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      npm_config_legacy_peer_deps: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Decompresser le projet
+        run: |
+          echo "Fichiers a la racine :"
+          ls -la
+          ZIP=$(ls *.zip 2>/dev/null | head -1)
+          if [ -z "$ZIP" ]; then echo "ERREUR : aucun zip a la racine du depot"; exit 1; fi
+          echo "Zip trouve : $ZIP"
+          unzip -q "$ZIP" -d app
+          P=$(find app -maxdepth 2 -name package.json -not -path '*/node_modules/*' | head -1)
+          if [ -z "$P" ]; then echo "ERREUR : package.json introuvable dans le zip"; exit 1; fi
+          echo "APPDIR=$(dirname "$P")" >> $GITHUB_ENV
+      - name: Construire le site
+        working-directory: ${{ env.APPDIR }}
+        run: |
+          npm install --legacy-peer-deps
+          npm run build
+      - name: Transformer en appli Android
+        working-directory: ${{ env.APPDIR }}
+        run: |
+          npm install --legacy-peer-deps @capacitor/core @capacitor/android
+          npm install --legacy-peer-deps -D @capacitor/cli
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "ne.darimmo.app",
+            "appName": "DARIMMO",
+            "webDir": "dist"
+          }
+          EOF
+          npx cap add android
+          npx cap sync android
+          VC=$(( ${{ github.run_number }} + 100 ))
+          sed -i "s/versionCode 1/versionCode $VC/" android/app/build.gradle
+      - name: Compiler l'APK
+        working-directory: ${{ env.APPDIR }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+      - name: Signer l'APK
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          echo "$KS_B64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/darimmo.jks"
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(find "${{ env.APPDIR }}/android/app/build/outputs/apk/release" -name "*.apk" | head -1)
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" aligned.apk
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/darimmo.jks" --ks-key-alias darimmo --ks-pass env:KS_PASS --key-pass env:KS_PASS --out DARIMMO.apk aligned.apk
+          "$BT/apksigner" verify DARIMMO.apk
+      - name: Publier l'APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: DARIMMO v${{ github.run_number }}
+          files: DARIMMO.apk
